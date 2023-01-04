@@ -19,9 +19,9 @@
 #     and timeout-disconnect controling...
 
 import http.server
-import http.cookies
 import socketserver
 import urllib.parse
+import base64
 
 import json
 import pymysql
@@ -37,6 +37,8 @@ ADDRESS = ("", PORT)
 READONLY_USER = "test_user"
 READONLY_PASS = "test_user"
 
+MAX_RETRY_COUNT = 5
+
 def default_proc(obj):
     return str(obj)
 
@@ -50,7 +52,7 @@ class ApiHTTPRequiestHandler(http.server.BaseHTTPRequestHandler):
     def connect(username, password):
         return pymysql.connect(
             host=server_info.host, user=username, passwd=password,
-            database=server_info.database, autocommit=True
+            database=server_info.database, autocommit=True, cursorclass=pymysql.cursors.DictCursor
         )
 
 
@@ -61,23 +63,26 @@ class ApiHTTPRequiestHandler(http.server.BaseHTTPRequestHandler):
         if decoded_query == "":
             # No response to empty query
             return
+
+        status_code = None
+        connection = None
     
         # Authentication
         auth = self.headers["Authentication"]
         if auth:
-            auth_data = auth.replace('Basic: ', '').decode('utf-8')
+            auth_data = base64.b64decode(auth.replace('Basic: ', '')).decode('utf-8')
             [username, password] = auth_data.split(":")
         else:
             username = READONLY_USER
             password = READONLY_PASS
 
-        hasher = haslib.sha256()
-        hasher.update(username)
-        hasher.update(password)
+        hasher = hashlib.sha256()
+        hasher.update(username.encode('utf-8'))
+        hasher.update(password.encode('utf-8'))
         hashed_auth_info = hasher.hexdigest()
 
         # Establishing / Using cached connection
-        if connections[username] is None:
+        if username not in ApiHTTPRequiestHandler.connections.keys():
             # new connection
             try:
                 new_connection = ApiHTTPRequiestHandler.connect(
@@ -90,11 +95,12 @@ class ApiHTTPRequiestHandler(http.server.BaseHTTPRequestHandler):
                 data_to_send = json.dumps(str(e)).encode('utf-8')
         else:
             cached_connection, cached_auth_info = ApiHTTPRequiestHandler.connections[username]
-            if hashed_auth_info == auth_info:
+            if hashed_auth_info == cached_auth_info:
                 connection = cached_connection
             else:
                 # User sending request is using wrong authentication information!
                 status_code = 401 # Set status code Unauthorized, and ensure connection is None
+                data_to_send = json.dumps("error: possibly wrong password").encode("utf-8")
 
         if connection is not None:
             for iretry in range(MAX_RETRY_COUNT):
@@ -116,7 +122,7 @@ class ApiHTTPRequiestHandler(http.server.BaseHTTPRequestHandler):
                     
                     # Replace connection to new one
                     new_connection = ApiHTTPRequiestHandler.connect(username, password)
-                    connections[username] = (new_connection, hashed_auth_info)
+                    ApiHTTPRequiestHandler.connections[username] = (new_connection, hashed_auth_info)
                     connection = new_connection
                     status_code = 500
                     data_to_send = json.dumps(str(e)).encode('utf-8')
@@ -124,8 +130,20 @@ class ApiHTTPRequiestHandler(http.server.BaseHTTPRequestHandler):
 
         self.send_response(status_code)
         self.send_header('Content-Type', 'text/json; charset=utf-8')
+        origin = self.headers["Origin"]
+        self.send_header('Access-Control-Allow-Origin', '*' if origin is None else origin)
+        self.send_header('Access-Control-Allow-Credentials', 'true')
+        #self.send_header('Access-Control-Allow-Headers', 'Authentication')
         self.end_headers()
         self.wfile.write(data_to_send)
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        origin = self.headers["Origin"]
+        self.send_header('Access-Control-Allow-Origin', '*' if origin is None else origin)
+        self.send_header('Access-Control-Allow-Credentials', 'true')
+        self.send_header('Access-Control-Allow-Headers', 'Authentication')
+        self.end_headers()
 
 with socketserver.TCPServer(ADDRESS, ApiHTTPRequiestHandler) as httpd:
     print("serving at a port", PORT)
