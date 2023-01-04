@@ -86,7 +86,7 @@ class ApiHTTPRequiestHandler(http.server.BaseHTTPRequestHandler):
             # new connection
             try:
                 new_connection = ApiHTTPRequiestHandler.connect(
-                    READONLY_USER, READONLY_PASS
+                    username, password
                 )
                 ApiHTTPRequiestHandler.connections[username] = (new_connection, hashed_auth_info)
                 connection = new_connection
@@ -121,9 +121,15 @@ class ApiHTTPRequiestHandler(http.server.BaseHTTPRequestHandler):
                     # Errors including old connection timeout
                     
                     # Replace connection to new one
-                    new_connection = ApiHTTPRequiestHandler.connect(username, password)
-                    ApiHTTPRequiestHandler.connections[username] = (new_connection, hashed_auth_info)
-                    connection = new_connection
+                    try:
+                        new_connection = ApiHTTPRequiestHandler.connect(username, password)
+                        ApiHTTPRequiestHandler.connections[username] = (new_connection, hashed_auth_info)
+                        connection = new_connection
+                    except Exception as e:
+                        # Errors including authentication error of DB
+                        status_code = 401
+                        data_to_send = json.dumps(str(e)).encode('utf-8')
+                        break # Exit retry loop
                     status_code = 500
                     data_to_send = json.dumps(str(e)).encode('utf-8')
                     # Entering retry loop
